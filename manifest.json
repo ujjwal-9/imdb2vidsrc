@@ -1,0 +1,13 @@
+{
+  "manifest_version": 3,
+  "name": "IMDB to Vidsrc",
+  "version": "1.0",
+  "description": "Extract IMDB IDs and open them in vidsrc.icu",
+  "permissions": ["activeTab"],
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"]
+    }
+  ]
+}

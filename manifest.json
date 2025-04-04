@@ -3,11 +3,18 @@
   "name": "IMDB to Vidsrc",
   "version": "1.0",
   "description": "Extract IMDB IDs and open them in vidsrc.icu",
-  "permissions": ["activeTab"],
+  "permissions": ["activeTab", "contextMenus", "scripting", "storage"],
+  "host_permissions": ["*://*.imdb.com/*"],
+  "action": {
+    "default_popup": "popup.html"
+  },
   "content_scripts": [
     {
       "matches": ["<all_urls>"],
       "js": ["content.js"]
     }
-  ]
+  ],
+  "background": {
+    "service_worker": "background.js"
+  }
 }

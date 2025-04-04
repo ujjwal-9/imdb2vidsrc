@@ -1,19 +1,131 @@
 document.addEventListener('DOMContentLoaded', initializePopup);
 
+// Default settings
+const DEFAULT_SETTINGS = {
+  baseUrl: 'vidsrc.icu'
+};
+
+// Global settings object
+let settings = { ...DEFAULT_SETTINGS };
+
 // Main initialization function
 function initializePopup() {
+  setupTabs();
   setupUI();
-  processCurrentTab();
+  loadSettings().then(() => {
+    processCurrentTab();
+  });
+}
+
+// Set up tab functionality
+function setupTabs() {
+  const tabs = document.querySelectorAll('.tab');
+  
+  tabs.forEach(tab => {
+    tab.addEventListener('click', () => {
+      // Remove active class from all tabs and content
+      document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+      document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+      
+      // Add active class to clicked tab
+      tab.classList.add('active');
+      
+      // Show corresponding content
+      const tabName = tab.getAttribute('data-tab');
+      document.getElementById(`${tabName}-tab`).classList.add('active');
+    });
+  });
 }
 
 // Set up the UI components
 function setupUI() {
-  // Set up event listeners
+  // Main tab event listeners
   document.getElementById('watch-button').addEventListener('click', handleWatchClick);
   document.getElementById('imdb-button').addEventListener('click', handleImdbClick);
   
+  // Settings tab event listeners
+  document.getElementById('save-settings').addEventListener('click', saveSettings);
+  document.getElementById('reset-settings').addEventListener('click', resetSettings);
+  
   // Set up number input defaults and constraints
   setupNumberInputs();
+}
+
+// Load settings from storage
+async function loadSettings() {
+  return new Promise((resolve) => {
+    chrome.storage.local.get('settings', (data) => {
+      if (data.settings) {
+        settings = { ...DEFAULT_SETTINGS, ...data.settings };
+      }
+      
+      // Update UI with loaded settings
+      document.getElementById('base-url').value = settings.baseUrl;
+      
+      resolve();
+    });
+  });
+}
+
+// Save settings to storage
+function saveSettings() {
+  const baseUrl = document.getElementById('base-url').value.trim();
+  
+  // Validate URL (basic validation)
+  if (!baseUrl) {
+    showSettingsError('Base URL cannot be empty');
+    return;
+  }
+  
+  // Remove protocol if included
+  const cleanUrl = baseUrl.replace(/^https?:\/\//, '');
+  
+  // Store settings
+  settings.baseUrl = cleanUrl;
+  chrome.storage.local.set({ settings }, () => {
+    // Show success message
+    const savedMsg = document.querySelector('.settings-saved');
+    savedMsg.classList.add('show');
+    
+    // Hide after 2 seconds
+    setTimeout(() => {
+      savedMsg.classList.remove('show');
+    }, 2000);
+  });
+}
+
+// Reset settings to default
+function resetSettings() {
+  settings = { ...DEFAULT_SETTINGS };
+  document.getElementById('base-url').value = settings.baseUrl;
+  
+  chrome.storage.local.set({ settings }, () => {
+    // Show success message
+    const savedMsg = document.querySelector('.settings-saved');
+    savedMsg.classList.add('show');
+    savedMsg.textContent = 'Settings reset to default!';
+    
+    // Hide after 2 seconds
+    setTimeout(() => {
+      savedMsg.classList.remove('show');
+      savedMsg.textContent = 'Settings saved!';
+    }, 2000);
+  });
+}
+
+// Show error in settings tab
+function showSettingsError(message) {
+  const savedMsg = document.querySelector('.settings-saved');
+  savedMsg.textContent = message;
+  savedMsg.style.color = 'red';
+  savedMsg.classList.add('show');
+  
+  // Hide after 3 seconds
+  setTimeout(() => {
+    savedMsg.classList.remove('show');
+    savedMsg.style.color = 'green';
+    savedMsg.textContent = 'Settings saved!';
+  }, 3000);
 }
 
 // Set up the number inputs with constraints
@@ -62,8 +174,8 @@ function processCurrentTab() {
       chrome.tabs.query({ active: true, currentWindow: true }, function(tabs) {
         const currentTab = tabs[0];
         
-        // Check if we're on a vidsrc.icu page
-        if (currentTab.url.includes('vidsrc.icu/embed/')) {
+        // Check if we're on a vidsrc page
+        if (currentTab.url.includes('vidsrc.')) {
           processVidsrcPage(currentTab.url);
         } else {
           // Check if we're on an IMDb page
@@ -167,7 +279,7 @@ function processImdbId(imdbId) {
   }, (response) => {
     // For movies, open directly without showing the popup
     if (response && response.type && response.type !== 'TVSeries' && response.type !== 'TVEpisode') {
-      const vidsrcUrl = `https://vidsrc.icu/embed/movie/${imdbId}`;
+      const vidsrcUrl = getVidsrcUrl('movie', imdbId);
       chrome.tabs.create({ url: vidsrcUrl });
       // Close the popup
       window.close();
@@ -177,6 +289,17 @@ function processImdbId(imdbId) {
     // For TV shows, show the TV controls
     handleContentDetailsResponse(response);
   });
+}
+
+// Get properly formatted vidsrc URL based on settings
+function getVidsrcUrl(type, imdbId, season = null, episode = null) {
+  const baseUrl = settings.baseUrl;
+  
+  if (type === 'tv' && season !== null && episode !== null) {
+    return `https://${baseUrl}/embed/tv/${imdbId}/${season}/${episode}`;
+  } else {
+    return `https://${baseUrl}/embed/movie/${imdbId}`;
+  }
 }
 
 // Handle the response from getContentDetails
@@ -257,17 +380,23 @@ function handleWatchClick() {
       // Get values from number inputs
       const season = document.getElementById('season').value || 1;
       const episode = document.getElementById('episode').value || 1;
-      vidsrcUrl = `https://vidsrc.icu/embed/tv/${imdbId}/${season}/${episode}`;
+      vidsrcUrl = getVidsrcUrl('tv', imdbId, season, episode);
     } else {
-      vidsrcUrl = `https://vidsrc.icu/embed/movie/${imdbId}`;
+      vidsrcUrl = getVidsrcUrl('movie', imdbId);
     }
     
     // Open the Vidsrc URL in a new tab if we're not already on Vidsrc,
     // otherwise update the current tab
     chrome.tabs.query({ active: true, currentWindow: true }, function(tabs) {
+      if (!tabs || tabs.length === 0) {
+        // No active tab found, open in new tab
+        chrome.tabs.create({ url: vidsrcUrl });
+        return;
+      }
+      
       const currentTab = tabs[0];
       
-      if (currentTab.url.includes('vidsrc.icu/embed/')) {
+      if (currentTab && currentTab.url && currentTab.url.includes('vidsrc.')) {
         // Update the current tab
         chrome.tabs.update(currentTab.id, { url: vidsrcUrl });
       } else {

@@ -7,6 +7,7 @@
       width: 300px;
       padding: 15px;
       font-family: Arial, sans-serif;
+      margin: 0;
     }
     h2 {
       margin-top: 0;
@@ -30,6 +31,14 @@
       border-radius: 3px;
       border: 1px solid #ccc;
       font-size: 14px;
+    }
+    input[type="text"] {
+      width: calc(100% - 12px);
+      padding: 5px;
+      border-radius: 3px;
+      border: 1px solid #ccc;
+      font-size: 14px;
+      margin-bottom: 15px;
     }
     .input-container {
       display: flex;
@@ -70,6 +79,12 @@
     }
     .button-container {
       margin-top: 10px;
+      display: flex;
+      gap: 10px;
+    }
+    .button-container button {
+      flex: 1;
+      margin-top: 5px;
     }
     .content-info {
       margin: 10px 0;
@@ -98,45 +113,106 @@
       0% { transform: rotate(0deg); }
       100% { transform: rotate(360deg); }
     }
+    /* Tab styling */
+    .tabs {
+      display: flex;
+      border-bottom: 1px solid #ccc;
+      margin-bottom: 15px;
+    }
+    .tab {
+      padding: 8px 15px;
+      cursor: pointer;
+      background: #f2f2f2;
+      border: 1px solid #ccc;
+      border-bottom: none;
+      border-radius: 5px 5px 0 0;
+      margin-right: 5px;
+    }
+    .tab.active {
+      background: white;
+      position: relative;
+      bottom: -1px;
+      border-bottom: 1px solid white;
+    }
+    .tab-content {
+      display: none;
+    }
+    .tab-content.active {
+      display: block;
+    }
+    .settings-saved {
+      color: green;
+      margin-top: 10px;
+      text-align: center;
+      font-weight: bold;
+      opacity: 0;
+      transition: opacity 0.5s;
+    }
+    .show {
+      opacity: 1;
+    }
   </style>
 </head>
 <body>
-  <h2>IMDb to Vidsrc</h2>
-  
-  <div id="loading" class="hidden">
-    <div class="loader"></div>
-    <p>Detecting content type...</p>
+  <div class="tabs">
+    <div class="tab active" data-tab="main">Main</div>
+    <div class="tab" data-tab="settings">Settings</div>
   </div>
-  
-  <div id="content-info" class="hidden content-info">
-    <div id="title"></div>
-    <div id="type"></div>
+
+  <div id="main-tab" class="tab-content active">
+    <h2>IMDb to Vidsrc</h2>
+    
+    <div id="loading" class="hidden">
+      <div class="loader"></div>
+      <p>Detecting content type...</p>
+    </div>
+    
+    <div id="content-info" class="hidden content-info">
+      <div id="title"></div>
+      <div id="type"></div>
+    </div>
+    
+    <div id="tv-controls" class="hidden">
+      <div class="input-container">
+        <div class="input-group">
+          <label for="season">Season:</label>
+          <input type="number" id="season" min="1" step="1" value="1">
+        </div>
+        
+        <div class="input-group">
+          <label for="episode">Episode:</label>
+          <input type="number" id="episode" min="1" step="1" value="1">
+        </div>
+      </div>
+    </div>
+    
+    <div id="movie-controls" class="hidden">
+      <p>This content is a movie. Click the button below to watch it or return to IMDb.</p>
+      <div class="button-container">
+        <button id="imdb-button" class="secondary-button">View on IMDb</button>
+      </div>
+    </div>
+    
+    <button id="watch-button">Watch</button>
+    
+    <div id="error-message" class="hidden"></div>
   </div>
-  
-  <div id="tv-controls" class="hidden">
-    <div class="input-container">
-      <div class="input-group">
-        <label for="season">Season:</label>
-        <input type="number" id="season" min="1" step="1" value="1">
+
+  <div id="settings-tab" class="tab-content">
+    <h2>Settings</h2>
+    
+    <div class="settings-form">
+      <label for="base-url">Base Vidsrc URL:</label>
+      <input type="text" id="base-url" placeholder="e.g., vidsrc.icu, vidsrc.to">
+      
+      <div class="button-container">
+        <button id="save-settings" class="secondary-button">Save</button>
+        <button id="reset-settings" class="secondary-button">Reset to Default</button>
       </div>
       
-      <div class="input-group">
-        <label for="episode">Episode:</label>
-        <input type="number" id="episode" min="1" step="1" value="1">
-      </div>
+      <div class="settings-saved">Settings saved!</div>
     </div>
   </div>
-  
-  <div id="movie-controls" class="hidden">
-    <p>This content is a movie. Click the button below to watch it or return to IMDb.</p>
-    <div class="button-container">
-      <button id="imdb-button" class="secondary-button">View on IMDb</button>
-    </div>
-  </div>
-  
-  <button id="watch-button">Watch</button>
-  
-  <div id="error-message" class="hidden"></div>
   
   <script src="popup.js"></script>
 </body>

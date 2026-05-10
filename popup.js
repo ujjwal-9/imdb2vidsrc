@@ -28,6 +28,7 @@ function switchTab(name) {
   document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
   document.querySelectorAll('.tab-content').forEach(c => c.classList.toggle('active', c.id === `${name}-tab`));
   if (name === 'history') renderHistory();
+  if (name === 'saved') renderSaved();
   if (name === 'search') document.getElementById('search-input').focus();
 }
 
@@ -49,6 +50,7 @@ function setupUI() {
   });
 
   document.getElementById('clear-history').addEventListener('click', clearAllHistory);
+  document.getElementById('star-toggle').addEventListener('click', handleStarToggle);
 
   document.getElementById('season').addEventListener('change', () => {
     if (currentImdbId && currentType === 'tv') {
@@ -194,7 +196,12 @@ async function processCurrentTab() {
     return processProviderPage(url);
   }
   const imdbId = (url.match(/imdb\.com\/title\/(tt\d+)/) || [])[1];
-  if (imdbId) return processImdbId(imdbId);
+  if (imdbId) {
+    // Auto-fill season from /episodes/?season=N URL context.
+    const seasonMatch = url.match(/[?&]season=(\d+)/);
+    const ctx = seasonMatch ? { season: +seasonMatch[1] } : null;
+    return processImdbId(imdbId, ctx);
+  }
 
   showEmptyState();
 }
@@ -250,19 +257,17 @@ function processProviderPage(url) {
     return;
   }
 
-  if (type === 'tv') {
-    document.getElementById('season').value = season || 1;
-    document.getElementById('episode').value = episode || 1;
-  }
-
-  fetchContent(imdbId, type);
+  // Pass season/episode forward so applyTvInputs uses them
+  // (this is the most authoritative source — user is actively watching).
+  const ctx = (type === 'tv') ? { season: season || 1, episode: episode || 1 } : null;
+  fetchContent(imdbId, type, ctx);
 }
 
-function processImdbId(imdbId) {
-  fetchContent(imdbId, null);
+function processImdbId(imdbId, context) {
+  fetchContent(imdbId, null, context || null);
 }
 
-function fetchContent(imdbId, forcedType) {
+function fetchContent(imdbId, forcedType, context) {
   currentImdbId = imdbId;
   chrome.runtime.sendMessage({ action: 'getContentDetails', imdbId }, async (response) => {
     showLoading(false);
@@ -273,31 +278,59 @@ function fetchContent(imdbId, forcedType) {
       renderContentInfo({ imdbId, title: currentTitle, type: 'Unknown' });
       const fallbackType = forcedType || 'movie';
       const progress = await getProgress(imdbId);
-      applyProgressToInputs(progress, fallbackType);
+      applyTvInputs(progress, fallbackType, context, null);
       applyContentType(fallbackType);
       revealWatchControls();
+      refreshStarToggle(imdbId);
       showResumeBanner(progress);
       return;
     }
 
-    currentTitle = response.title || `IMDb ${imdbId}`;
+    // If the requested id was a TVEpisode, the background returned series
+    // details with `episodeContext` attached. Swap currentImdbId to the
+    // series so subsequent watch URLs use the right id.
+    const epCtx = response.episodeContext || null;
+    currentImdbId = response.imdbId || imdbId;
+    currentTitle = response.title || `IMDb ${currentImdbId}`;
     renderContentInfo(response);
 
-    const detectedType = (response.type === 'TVSeries' || response.type === 'TVEpisode') ? 'tv' : 'movie';
+    const detectedType = (response.type === 'TVSeries' || epCtx) ? 'tv' : 'movie';
     const type = forcedType || detectedType;
 
-    const progress = await getProgress(imdbId);
-    applyProgressToInputs(progress, type);
+    const progress = await getProgress(currentImdbId);
+    applyTvInputs(progress, type, context, epCtx);
     applyContentType(type);
     revealWatchControls();
+    refreshStarToggle(currentImdbId);
     showResumeBanner(progress);
   });
 }
 
-function applyProgressToInputs(progress, type) {
-  if (progress && type === 'tv' && progress.season && progress.episode) {
-    document.getElementById('season').value = progress.season;
-    document.getElementById('episode').value = progress.episode;
+// Prefill season/episode using precedence:
+//   provider-URL context (full S/E) > stored progress > episodeContext >
+//   /episodes/?season=N URL > defaults.
+function applyTvInputs(progress, type, urlContext, epContext) {
+  if (type !== 'tv') return;
+  const seasonEl = document.getElementById('season');
+  const episodeEl = document.getElementById('episode');
+
+  if (urlContext && urlContext.season && urlContext.episode) {
+    seasonEl.value = urlContext.season;
+    episodeEl.value = urlContext.episode;
+    return;
+  }
+  if (progress && progress.season && progress.episode) {
+    seasonEl.value = progress.season;
+    episodeEl.value = progress.episode;
+    return;
+  }
+  if (epContext && epContext.season) {
+    seasonEl.value = epContext.season;
+    episodeEl.value = epContext.episode || 1;
+    return;
+  }
+  if (urlContext && urlContext.season) {
+    seasonEl.value = urlContext.season;
   }
 }
 
@@ -308,11 +341,51 @@ function revealWatchControls() {
   renderProviderChips();
 }
 
-function renderContentInfo({ title, type, imdbId }) {
+function renderContentInfo(details) {
+  const { title, type, imdbId, poster, year, rating, ratingCount, runtime, genres, episodeContext } = details;
   const el = document.getElementById('content-info');
   el.classList.remove('hidden');
+
   document.getElementById('title').textContent = title || `IMDb ${imdbId}`;
-  document.getElementById('meta').textContent = `IMDb ${imdbId} · ${type}`;
+
+  const posterEl = document.getElementById('poster');
+  if (poster) {
+    posterEl.src = poster;
+    posterEl.style.display = '';
+  } else {
+    posterEl.removeAttribute('src');
+    posterEl.style.display = 'none';
+  }
+  posterEl.onerror = () => { posterEl.style.display = 'none'; };
+
+  const infoRow = document.getElementById('info-row');
+  infoRow.innerHTML = '';
+  const parts = [];
+  if (year) parts.push(`<span>${year}</span>`);
+  if (runtime) parts.push(`<span>${runtime}</span>`);
+  if (rating) {
+    const count = ratingCount ? ` (${formatCount(ratingCount)})` : '';
+    parts.push(`<span class="rating">★ ${rating}${count}</span>`);
+  }
+  if (Array.isArray(genres) && genres.length) parts.push(`<span>${genres.slice(0, 3).join(', ')}</span>`);
+  infoRow.innerHTML = parts.join('<span class="sep">·</span>');
+
+  const epEl = document.getElementById('episode-info');
+  if (episodeContext && episodeContext.season && episodeContext.episode) {
+    const epTitle = episodeContext.episodeTitle ? `: ${episodeContext.episodeTitle}` : '';
+    epEl.textContent = `Episode S${episodeContext.season}E${episodeContext.episode}${epTitle}`;
+    epEl.classList.remove('hidden');
+  } else {
+    epEl.classList.add('hidden');
+  }
+
+  document.getElementById('id-row').textContent = `IMDb ${details.imdbId || imdbId} · ${type}`;
+}
+
+function formatCount(n) {
+  if (n >= 1e6) return (n / 1e6).toFixed(1).replace(/\.0$/, '') + 'M';
+  if (n >= 1e3) return (n / 1e3).toFixed(1).replace(/\.0$/, '') + 'k';
+  return String(n);
 }
 
 function showEmptyState() {
@@ -688,4 +761,90 @@ function normalizeEpisode(ep) {
     airDate = ep.releaseDate;
   }
   return { number, title, airDate };
+}
+
+// ---- Watchlist (storage.sync via background) ----
+function refreshStarToggle(imdbId) {
+  const star = document.getElementById('star-toggle');
+  if (!imdbId) { star.style.display = 'none'; return; }
+  star.style.display = '';
+  star.dataset.imdbId = imdbId;
+  chrome.runtime.sendMessage({ action: 'inWatchlist', imdbId }, (resp) => {
+    setStar(resp && resp.saved);
+  });
+}
+
+function setStar(saved) {
+  const star = document.getElementById('star-toggle');
+  star.textContent = saved ? '★' : '☆';
+  star.title = saved ? 'Remove from watchlist' : 'Save to watchlist';
+}
+
+function handleStarToggle() {
+  const star = document.getElementById('star-toggle');
+  const id = star.dataset.imdbId;
+  if (!id) return;
+  chrome.runtime.sendMessage({ action: 'toggleWatchlist', imdbId: id }, (resp) => {
+    if (!resp) return;
+    if (resp.error) {
+      star.title = resp.error;
+      // Brief visual nudge
+      star.style.color = '#c00';
+      setTimeout(() => { star.style.color = ''; }, 1200);
+      return;
+    }
+    setStar(!!resp.saved);
+  });
+}
+
+async function renderSaved() {
+  const container = document.getElementById('saved-list');
+  const empty = document.getElementById('saved-empty');
+  container.innerHTML = '';
+  const list = await new Promise(r => chrome.runtime.sendMessage({ action: 'getWatchlist' }, r));
+  const entries = (list && list.list) || [];
+  if (entries.length === 0) {
+    empty.classList.remove('hidden');
+    return;
+  }
+  empty.classList.add('hidden');
+  entries.forEach(entry => container.appendChild(renderSavedRow(entry)));
+}
+
+function renderSavedRow(entry) {
+  const row = document.createElement('div');
+  row.className = 'history-row';
+
+  const info = document.createElement('div');
+  info.className = 'info';
+  const title = document.createElement('div');
+  title.className = 'title';
+  title.textContent = entry.title || `IMDb ${entry.imdbId}`;
+  const sub = document.createElement('div');
+  sub.className = 'sub';
+  const parts = [];
+  if (entry.year) parts.push(entry.year);
+  parts.push(entry.type === 'tv' ? 'TV Series' : 'Movie');
+  parts.push(`saved ${formatRelativeTime(entry.addedAt)}`);
+  sub.textContent = parts.join(' · ');
+  info.appendChild(title);
+  info.appendChild(sub);
+  row.appendChild(info);
+
+  const del = document.createElement('div');
+  del.className = 'delete';
+  del.textContent = '×';
+  del.title = 'Remove';
+  del.addEventListener('click', (e) => {
+    e.stopPropagation();
+    chrome.runtime.sendMessage({ action: 'toggleWatchlist', imdbId: entry.imdbId }, () => renderSaved());
+  });
+  row.appendChild(del);
+
+  row.addEventListener('click', () => {
+    switchTab('watch');
+    hideAllStates();
+    fetchContent(entry.imdbId, entry.type, null);
+  });
+  return row;
 }

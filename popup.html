@@ -63,14 +63,66 @@
     .button-container { display: flex; gap: 8px; }
     .button-container button { flex: 1; margin-top: 6px; }
     .content-info {
+      display: flex;
+      gap: 10px;
       margin: 10px 0;
       padding: 10px;
       background: #f5f5f5;
       border-radius: 4px;
       font-size: 13px;
     }
-    .content-info #title { font-weight: 600; }
-    .content-info #meta { color: #666; font-size: 12px; margin-top: 2px; }
+    .content-info .poster {
+      width: 60px;
+      height: 90px;
+      object-fit: cover;
+      border-radius: 3px;
+      background: #ddd;
+      flex-shrink: 0;
+    }
+    .content-info .body { flex: 1; min-width: 0; }
+    .content-info .title-row {
+      display: flex;
+      align-items: flex-start;
+      gap: 6px;
+    }
+    .content-info .title-text {
+      font-weight: 600;
+      font-size: 14px;
+      line-height: 1.2;
+      flex: 1;
+      min-width: 0;
+    }
+    .content-info .star {
+      cursor: pointer;
+      font-size: 16px;
+      color: #f50;
+      line-height: 1;
+      user-select: none;
+      flex-shrink: 0;
+    }
+    .content-info .star:hover { transform: scale(1.1); }
+    .content-info .info-row {
+      color: #555;
+      font-size: 12px;
+      margin-top: 4px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      align-items: center;
+    }
+    .content-info .info-row .sep { color: #bbb; }
+    .content-info .info-row .rating { color: #d4a017; font-weight: 600; }
+    .content-info .episode-info {
+      color: #b85800;
+      font-size: 11px;
+      margin-top: 4px;
+      font-style: italic;
+    }
+    .content-info .id-row {
+      color: #aaa;
+      font-size: 11px;
+      margin-top: 4px;
+    }
     .hidden { display: none !important; }
     #error-message { color: #c00; margin-top: 10px; font-size: 13px; }
     .loader {
@@ -226,6 +278,7 @@
   <div class="tabs">
     <div class="tab active" data-tab="watch">Watch</div>
     <div class="tab" data-tab="search">Search</div>
+    <div class="tab" data-tab="saved">Saved</div>
     <div class="tab" data-tab="history">History</div>
     <div class="tab" data-tab="settings">Settings</div>
   </div>
@@ -241,8 +294,16 @@
     </div>
 
     <div id="content-info" class="hidden content-info">
-      <div id="title"></div>
-      <div id="meta"></div>
+      <img class="poster" id="poster" alt="" />
+      <div class="body">
+        <div class="title-row">
+          <div class="title-text" id="title"></div>
+          <span class="star" id="star-toggle" title="Save to watchlist">☆</span>
+        </div>
+        <div class="info-row" id="info-row"></div>
+        <div class="episode-info hidden" id="episode-info"></div>
+        <div class="id-row" id="id-row"></div>
+      </div>
     </div>
 
     <div id="resume-banner" class="resume-banner hidden">
@@ -299,6 +360,12 @@
     <input type="search" id="search-input" placeholder="Search movies, TV shows, ..." autocomplete="off">
     <div id="search-status" class="empty-list hidden">Type at least 2 characters</div>
     <div id="search-results"></div>
+  </div>
+
+  <div id="saved-tab" class="tab-content">
+    <h2>Saved titles</h2>
+    <div id="saved-list"></div>
+    <div id="saved-empty" class="empty-list hidden">Nothing saved yet. Tap ☆ on a title to add it.</div>
   </div>
 
   <div id="history-tab" class="tab-content">

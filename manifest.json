@@ -19,5 +19,35 @@
   ],
   "background": {
     "service_worker": "background.js"
+  },
+  "commands": {
+    "_execute_action": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+Y",
+        "mac": "Command+Shift+Y"
+      },
+      "description": "Open IMDb to Vidsrc popup"
+    },
+    "next-episode": {
+      "suggested_key": {
+        "default": "Alt+Shift+Right",
+        "mac": "Alt+Shift+Right"
+      },
+      "description": "Watch next episode (on a player tab)"
+    },
+    "prev-episode": {
+      "suggested_key": {
+        "default": "Alt+Shift+Left",
+        "mac": "Alt+Shift+Left"
+      },
+      "description": "Watch previous episode (on a player tab)"
+    },
+    "switch-provider": {
+      "suggested_key": {
+        "default": "Alt+Shift+P",
+        "mac": "Alt+Shift+P"
+      },
+      "description": "Cycle to the next enabled provider"
+    }
   }
 }

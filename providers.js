@@ -81,6 +81,57 @@ function buildVidsrcUrl(provider, type, imdbId, season, episode) {
     .replaceAll('{episode}', episode != null ? String(episode) : '');
 }
 
+// Recognise a provider's player URL. Used by both popup (for "you are
+// already on a vidsrc tab" handling) and background (for keyboard
+// shortcuts that operate on the current player tab).
+function parseProviderUrl(url) {
+  if (!url || typeof url !== 'string') return null;
+  let m;
+
+  m = url.match(/\/embed\/movie\/(tt\d+)/);
+  if (m) return { imdbId: m[1], type: 'movie', season: null, episode: null };
+
+  m = url.match(/\/embed\/tv\/(tt\d+)\/(\d+)\/(\d+)/);
+  if (m) return { imdbId: m[1], type: 'tv', season: +m[2], episode: +m[3] };
+
+  m = url.match(/\/embedtv\/(tt\d+)&s=(\d+)&e=(\d+)/);
+  if (m) return { imdbId: m[1], type: 'tv', season: +m[2], episode: +m[3] };
+
+  m = url.match(/[?&]imdb=(tt\d+)/);
+  if (m) {
+    const s = url.match(/[?&]season=(\d+)/);
+    const e = url.match(/[?&]episode=(\d+)/);
+    if (s && e) return { imdbId: m[1], type: 'tv', season: +s[1], episode: +e[1] };
+    return { imdbId: m[1], type: 'movie', season: null, episode: null };
+  }
+
+  m = url.match(/[?&]video_id=(tt\d+)/);
+  if (m) {
+    const s = url.match(/[?&]s=(\d+)/);
+    const e = url.match(/[?&]e=(\d+)/);
+    if (s && e) return { imdbId: m[1], type: 'tv', season: +s[1], episode: +e[1] };
+    return { imdbId: m[1], type: 'movie', season: null, episode: null };
+  }
+
+  m = url.match(/\/embed\/(tt\d+)/);
+  if (m) return { imdbId: m[1], type: 'movie', season: null, episode: null };
+
+  return null;
+}
+
+// Match a player URL to one of the configured providers by host.
+function findProviderByUrl(providers, url) {
+  if (!url) return null;
+  let host;
+  try { host = new URL(url).host; } catch { return null; }
+  return providers.find(p => {
+    try {
+      const tplHost = new URL(p.movie.replace('{imdb}', 'tt0000000')).host;
+      return host === tplHost;
+    } catch { return false; }
+  }) || null;
+}
+
 // Read settings, falling back to defaults. Returns the merged object
 // plus the resolved provider list.
 function loadSettingsAndProviders() {
@@ -100,4 +151,6 @@ if (typeof self !== 'undefined') {
   self.getProviderById = getProviderById;
   self.buildVidsrcUrl = buildVidsrcUrl;
   self.loadSettingsAndProviders = loadSettingsAndProviders;
+  self.parseProviderUrl = parseProviderUrl;
+  self.findProviderByUrl = findProviderByUrl;
 }

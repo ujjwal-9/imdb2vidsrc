@@ -2,20 +2,20 @@
 function addVidsrcButton(link) {
   // Skip if button already added or if the parent already has a vidsrc button
   if (link.vidsrcButton || link.parentNode?.querySelector('.vidsrc-watch-button')) return;
-  
+
   // Only process IMDb links
   if (!link.href || !link.href.includes('imdb.com/title/')) return;
-  
+
   const imdbId = link.href.match(/\/title\/(tt\d+)/)?.[1];
   if (!imdbId) return;
 
   // Mark the link as processed to avoid duplicate buttons
   link.vidsrcButton = true;
 
-  // Create the button with all styling and functionality
+  // Watch button (orange).
   const button = document.createElement('a');
   button.textContent = '▶ Watch';
-  button.className = 'vidsrc-watch-button'; // Add a class for easier identification
+  button.className = 'vidsrc-watch-button';
   button.style.cssText = `
     margin-left: 5px;
     padding: 2px 6px;
@@ -27,38 +27,78 @@ function addVidsrcButton(link) {
     cursor: pointer;
     display: inline-block;
   `;
-  
-  // Add click handler directly during creation
+
   button.addEventListener('click', (e) => {
     e.preventDefault();
-    
     try {
-      // Store the IMDb ID for the popup to use
       chrome.storage.local.set({ lastClickedImdbId: imdbId }, () => {
-        // Open the extension popup or directly navigate to vidsrc
         if (chrome.runtime && chrome.runtime.sendMessage) {
-          chrome.runtime.sendMessage({ 
-            action: 'openPopup', 
-            imdbId: imdbId 
-          }).catch(error => {
-            console.log('Failed to send message:', error);
-            // Fallback: open vidsrc directly
-            openVidsrc(imdbId);
-          });
+          chrome.runtime.sendMessage({ action: 'openPopup', imdbId }).catch(() => openVidsrc(imdbId));
         } else {
-          // Runtime not available, open vidsrc directly
           openVidsrc(imdbId);
         }
       });
     } catch (error) {
-      console.log('Extension context error:', error);
-      // Fallback: open vidsrc directly without using extension APIs
       openVidsrc(imdbId);
     }
   });
-  
-  // Append the button to the link
+
+  // Star toggle for watchlist.
+  const star = document.createElement('a');
+  star.className = 'vidsrc-star-button';
+  star.textContent = '☆';
+  star.title = 'Save to watchlist';
+  star.style.cssText = `
+    margin-left: 4px;
+    padding: 2px 5px;
+    background: #fff;
+    color: #f50;
+    border: 1px solid #f50;
+    border-radius: 3px;
+    font-size: 12px;
+    text-decoration: none;
+    cursor: pointer;
+    display: inline-block;
+    line-height: 1;
+  `;
+
+  const renderStar = (saved) => {
+    star.textContent = saved ? '★' : '☆';
+    if (saved) {
+      star.style.background = '#f50';
+      star.style.color = '#fff';
+      star.title = 'Remove from watchlist';
+    } else {
+      star.style.background = '#fff';
+      star.style.color = '#f50';
+      star.title = 'Save to watchlist';
+    }
+  };
+
+  // Initial state — best-effort, ignore failures (extension context invalidated, etc.)
+  try {
+    chrome.runtime.sendMessage({ action: 'inWatchlist', imdbId }, (resp) => {
+      if (resp && typeof resp.saved === 'boolean') renderStar(resp.saved);
+    });
+  } catch {}
+
+  star.addEventListener('click', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    try {
+      chrome.runtime.sendMessage({ action: 'toggleWatchlist', imdbId }, (resp) => {
+        if (!resp) return;
+        if (resp.error) {
+          star.title = resp.error;
+          return;
+        }
+        renderStar(!!resp.saved);
+      });
+    } catch {}
+  });
+
   link.parentNode.insertBefore(button, link.nextSibling);
+  link.parentNode.insertBefore(star, button.nextSibling);
 }
 
 // Fallback function to open vidsrc directly

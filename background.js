@@ -1,7 +1,31 @@
+// Pull in shared provider helpers (PRESET_PROVIDERS, DEFAULT_SETTINGS,
+// buildProviderList, getProviderById, buildVidsrcUrl, loadSettingsAndProviders).
+importScripts('providers.js');
+
 // Function to extract IMDB ID from URL
 function extractImdbId(url) {
   const match = url.match(/\/title\/(tt\d+)/);
   return match ? match[1] : null;
+}
+
+// Persist watch history when a title is opened via the context menu.
+async function recordProgress(imdbId, type, title, season, episode) {
+  const data = await new Promise(r => chrome.storage.local.get('progress', r));
+  const progress = data.progress || {};
+  progress[imdbId] = {
+    imdbId, type, title: title || `IMDb ${imdbId}`,
+    season: season || null,
+    episode: episode || null,
+    timestamp: Date.now()
+  };
+  return new Promise(r => chrome.storage.local.set({ progress }, r));
+}
+
+// Build a movie URL using the user's currently configured default provider.
+async function buildMovieUrlFromSettings(imdbId) {
+  const { settings, providers } = await loadSettingsAndProviders();
+  const provider = getProviderById(providers, settings.defaultProviderId);
+  return buildVidsrcUrl(provider, 'movie', imdbId);
 }
 
 // Function to fetch IMDb content details (type and title) in a single request
@@ -164,55 +188,41 @@ chrome.runtime.onInstalled.addListener(() => {
   });
 });
 
+// Open a movie directly using the user's configured default provider, and
+// log it to history so it appears in the popup's "Continue watching" list.
+async function openMovieDirect(imdbId, title) {
+  try {
+    const url = await buildMovieUrlFromSettings(imdbId);
+    recordProgress(imdbId, 'movie', title, null, null);
+    chrome.tabs.create({ url });
+  } catch (e) {
+    // Last-resort fallback if settings can't be read.
+    chrome.tabs.create({ url: `https://vidsrc.icu/embed/movie/${imdbId}` });
+  }
+}
+
 // Handle context menu clicks
 chrome.contextMenus.onClicked.addListener((info, tab) => {
-  if (info.menuItemId === "openInVidsrc") {
-    const imdbId = extractImdbId(info.linkUrl);
-    
-    if (imdbId) {
-      try {
-        // First, check if it's a movie or TV series
-        const cachedDetails = contentCache.get(imdbId);
-        
-        if (cachedDetails) {
-          // Use cached data if available
-          if (cachedDetails.type === 'TVSeries' || cachedDetails.type === 'TVEpisode') {
-            // For TV series, open the popup for season/episode selection
-            chrome.storage.local.set({ lastClickedImdbId: imdbId }, () => {
-              chrome.action.openPopup();
-            });
-          } else {
-            // For movies, open directly
-            const vidsrcUrl = `https://vidsrc.icu/embed/movie/${imdbId}`;
-            chrome.tabs.create({ url: vidsrcUrl });
-          }
-        } else {
-          // No cached data, need to fetch content type
-          getContentDetails(imdbId).then(details => {
-            // Cache the result
-            contentCache.set(imdbId, details);
-            
-            if (details.type === 'TVSeries' || details.type === 'TVEpisode') {
-              // For TV series, open the popup for season/episode selection
-              chrome.storage.local.set({ lastClickedImdbId: imdbId }, () => {
-                chrome.action.openPopup();
-              });
-            } else {
-              // For movies, open directly
-              const vidsrcUrl = `https://vidsrc.icu/embed/movie/${imdbId}`;
-              chrome.tabs.create({ url: vidsrcUrl });
-            }
-          }).catch(() => {
-            // On error, default to movie
-            const vidsrcUrl = `https://vidsrc.icu/embed/movie/${imdbId}`;
-            chrome.tabs.create({ url: vidsrcUrl });
-          });
-        }
-      } catch (error) {
-        // Fallback to movie as default
-        const vidsrcUrl = `https://vidsrc.icu/embed/movie/${imdbId}`;
-        chrome.tabs.create({ url: vidsrcUrl });
-      }
+  if (info.menuItemId !== "openInVidsrc") return;
+
+  const imdbId = extractImdbId(info.linkUrl);
+  if (!imdbId) return;
+
+  const handle = (details) => {
+    if (details && (details.type === 'TVSeries' || details.type === 'TVEpisode')) {
+      // TV: open popup for season/episode selection.
+      chrome.storage.local.set({ lastClickedImdbId: imdbId }, () => {
+        chrome.action.openPopup();
+      });
+    } else {
+      openMovieDirect(imdbId, details && details.title);
     }
-  }
+  };
+
+  const cached = contentCache.get(imdbId);
+  if (cached) return handle(cached);
+
+  getContentDetails(imdbId)
+    .then(details => { contentCache.set(imdbId, details); handle(details); })
+    .catch(() => openMovieDirect(imdbId, null));
 }); 

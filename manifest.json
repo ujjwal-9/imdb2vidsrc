@@ -1,10 +1,13 @@
 {
   "manifest_version": 3,
   "name": "IMDB to Vidsrc",
-  "version": "1.0",
-  "description": "Extract IMDB IDs and open them in vidsrc.icu",
+  "version": "1.1",
+  "description": "Find titles on IMDB, switch between embed providers, browse episodes, and resume where you left off.",
   "permissions": ["activeTab", "contextMenus", "scripting", "storage"],
-  "host_permissions": ["*://*.imdb.com/*"],
+  "host_permissions": [
+    "*://*.imdb.com/*",
+    "*://*.media-imdb.com/*"
+  ],
   "action": {
     "default_popup": "popup.html"
   },

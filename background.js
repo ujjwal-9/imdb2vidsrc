@@ -28,47 +28,62 @@ async function buildMovieUrlFromSettings(imdbId) {
   return buildVidsrcUrl(provider, 'movie', imdbId);
 }
 
-// Function to fetch IMDb content details (type and title) in a single request
+// Decode the small set of HTML entities IMDB titles tend to use.
+function decodeHtmlEntities(s) {
+  if (typeof s !== 'string') return s;
+  return s
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;|&#39;|&#x27;/g, "'")
+    .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(+n))
+    .replace(/&#x([0-9a-f]+);/gi, (_, n) => String.fromCharCode(parseInt(n, 16)));
+}
+
+// Fetch IMDb content details (type and title) in a single request.
 async function getContentDetails(imdbId) {
   try {
     const url = `https://www.imdb.com/title/${imdbId}/`;
     const response = await fetch(url);
-    
-    if (!response.ok) {
-      throw new Error(`HTTP error! Status: ${response.status}`);
-    }
-    
+    if (!response.ok) throw new Error(`HTTP error! Status: ${response.status}`);
     const html = await response.text();
-    
-    // Extract data from HTML
+
     const result = {
       imdbId,
-      type: 'Movie', // Default
+      type: 'Movie',
       title: 'Unknown Title'
     };
-    
-    // Extract title
-    const titleMatch = html.match(/<title>(.*?) - IMDb<\/title>/);
-    if (titleMatch && titleMatch[1]) {
-      result.title = titleMatch[1];
-    }
-    
-    // Extract content type from JSON-LD
-    const ldJsonRegex = /<script type="application\/ld\+json">([\s\S]*?)<\/script>/;
-    const match = ldJsonRegex.exec(html);
-    
-    if (match) {
+
+    // Prefer JSON-LD: it carries both @type and name in a stable shape.
+    const ldMatch = /<script type="application\/ld\+json">([\s\S]*?)<\/script>/.exec(html);
+    if (ldMatch) {
       try {
-        const jsonData = JSON.parse(match[1].trim());
-        result.type = jsonData['@type'] || 'Movie';
+        const jsonData = JSON.parse(ldMatch[1].trim());
+        if (jsonData['@type']) result.type = jsonData['@type'];
+        const nameField = jsonData.name;
+        if (typeof nameField === 'string' && nameField.trim()) {
+          result.title = decodeHtmlEntities(nameField).trim();
+        } else if (nameField && typeof nameField === 'object' && typeof nameField.name === 'string') {
+          result.title = decodeHtmlEntities(nameField.name).trim();
+        }
       } catch (parseError) {
-        // JSON parse error, keep default type
+        // Keep defaults on parse failure.
       }
     }
-    
+
+    // Fallback: <title> tag, stripped of any " - IMDb" / " | IMDb" suffix.
+    if (result.title === 'Unknown Title') {
+      const tagMatch = /<title>([\s\S]*?)<\/title>/i.exec(html);
+      if (tagMatch && tagMatch[1]) {
+        result.title = decodeHtmlEntities(tagMatch[1])
+          .replace(/\s*[-|–—]\s*IMDb\s*$/i, '')
+          .trim() || 'Unknown Title';
+      }
+    }
+
     return result;
   } catch (error) {
-    // Return default values on error
     return {
       imdbId,
       type: 'Movie',
@@ -90,14 +105,15 @@ const contentCache = {
     // Persist cache to storage for use across sessions
     chrome.storage.local.set({ contentCache: this.data });
   },
-  // Get if not expired (24 hours)
+  // Get if not expired (24 hours). Treat entries with a missing title as a
+  // miss so users with stale "Unknown Title" cache get refreshed automatically.
   get(imdbId) {
     const entry = this.data[imdbId];
     if (!entry) return null;
-    
-    // Check if cache entry is older than 24 hours
     const expired = Date.now() - entry.timestamp > 24 * 60 * 60 * 1000;
-    return expired ? null : entry.details;
+    if (expired) return null;
+    if (entry.details && entry.details.title === 'Unknown Title') return null;
+    return entry.details;
   },
   // Initialize cache from storage
   init() {

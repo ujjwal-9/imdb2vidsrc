@@ -5,27 +5,71 @@ let activeProviderId = settings.defaultProviderId;
 let currentImdbId = null;
 let currentTitle = null;
 let currentType = 'movie';
-const episodeCache = new Map();
 let searchDebounce = null;
+
+// A "watch this title" handoff from the content script / context menu is only
+// trusted briefly. Without this, a handoff left behind by a failed
+// openPopup() would hijack the next unrelated popup open.
+const LAST_CLICK_TTL_MS = 10 * 1000;
+
+// Episode lists are expensive to fetch (full IMDb page + __NEXT_DATA__ parse),
+// so they outlive the popup session.
+const EPISODE_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
+const EPISODE_CACHE_LIMIT = 40;
+const episodeCache = new Map();
+
+// Generous enough for long-running soaps and anime, which routinely list
+// hundreds of episodes in a single IMDb season.
+const SEASON_MAX = 200;
+const EPISODE_MAX = 2000;
+
+// Season switches race: a slow fetch for season 2 must not overwrite the list
+// for season 3 that the user has since selected.
+let episodeRequestSeq = 0;
 
 document.addEventListener('DOMContentLoaded', init);
 
 async function init() {
   setupTabs();
   setupUI();
-  await loadSettings();
+  await Promise.all([loadSettings(), initEpisodeCache()]);
+  // Legacy keys from earlier versions; harmless but no longer read.
+  chrome.storage.local.remove(['contentType', 'lastClickedImdbId']);
   await processCurrentTab();
 }
 
 // ---- Tabs ----
 function setupTabs() {
-  document.querySelectorAll('.tab').forEach(tab => {
+  const tabs = Array.from(document.querySelectorAll('.tab'));
+  tabs.forEach((tab, i) => {
     tab.addEventListener('click', () => switchTab(tab.dataset.tab));
+    tab.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        switchTab(tab.dataset.tab);
+        return;
+      }
+      let next = null;
+      if (e.key === 'ArrowRight') next = tabs[(i + 1) % tabs.length];
+      else if (e.key === 'ArrowLeft') next = tabs[(i - 1 + tabs.length) % tabs.length];
+      else if (e.key === 'Home') next = tabs[0];
+      else if (e.key === 'End') next = tabs[tabs.length - 1];
+      if (next) {
+        e.preventDefault();
+        switchTab(next.dataset.tab);
+        next.focus();
+      }
+    });
   });
 }
 
 function switchTab(name) {
-  document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
+  document.querySelectorAll('.tab').forEach(t => {
+    const active = t.dataset.tab === name;
+    t.classList.toggle('active', active);
+    t.setAttribute('aria-selected', active ? 'true' : 'false');
+    t.tabIndex = active ? 0 : -1;
+  });
   document.querySelectorAll('.tab-content').forEach(c => c.classList.toggle('active', c.id === `${name}-tab`));
   if (name === 'history') renderHistory();
   if (name === 'saved') renderSaved();
@@ -51,6 +95,12 @@ function setupUI() {
 
   document.getElementById('clear-history').addEventListener('click', clearAllHistory);
   document.getElementById('star-toggle').addEventListener('click', handleStarToggle);
+  document.getElementById('star-toggle').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      handleStarToggle();
+    }
+  });
 
   document.getElementById('season').addEventListener('change', () => {
     if (currentImdbId && currentType === 'tv') {
@@ -63,28 +113,30 @@ function setupUI() {
 }
 
 function setupNumberInputs() {
-  ['season', 'episode'].forEach(id => {
+  Object.entries({ season: SEASON_MAX, episode: EPISODE_MAX }).forEach(([id, max]) => {
     const input = document.getElementById(id);
     input.min = 1;
-    input.max = 100;
+    input.max = max;
     input.addEventListener('input', () => {
+      // Clamp out-of-range numbers only. Rewriting an empty field to "1" while
+      // typing makes it impossible to clear and retype.
       const v = parseInt(input.value);
-      if (isNaN(v) || v < 1) input.value = 1;
-      if (v > 100) input.value = 100;
+      if (isNaN(v)) return;
+      if (v > max) input.value = max;
+      else if (v < 1) input.value = 1;
     });
-    input.addEventListener('blur', () => { input.value = parseInt(input.value) || 1; });
+    input.addEventListener('blur', () => {
+      const v = parseInt(input.value);
+      input.value = isNaN(v) ? 1 : Math.min(max, Math.max(1, v));
+    });
   });
 }
 
 // ---- Settings ----
 async function loadSettings() {
-  const data = await new Promise(r => chrome.storage.local.get('settings', r));
-  settings = { ...DEFAULT_SETTINGS, ...(data.settings || {}) };
-  // Ensure stored arrays/ids are sane.
-  if (!Array.isArray(settings.enabledProviderIds) || settings.enabledProviderIds.length === 0) {
-    settings.enabledProviderIds = [...DEFAULT_SETTINGS.enabledProviderIds];
-  }
-  providers = buildProviderList(settings);
+  const resolved = await loadSettingsAndProviders();
+  settings = resolved.settings;
+  providers = resolved.providers;
   activeProviderId = settings.defaultProviderId;
   document.getElementById('base-url').value = settings.baseUrl;
   renderSettings();
@@ -119,8 +171,13 @@ function renderSettings() {
 }
 
 function saveSettings() {
-  const baseUrl = document.getElementById('base-url').value.trim().replace(/^https?:\/\//, '');
-  if (!baseUrl) return showSettingsMsg('Custom host cannot be empty', 'red');
+  const baseUrlInput = document.getElementById('base-url');
+  const baseUrl = normalizeBaseUrl(baseUrlInput.value);
+  if (!baseUrl) {
+    return showSettingsMsg('Enter a valid host, e.g. vidsrc.icu', 'red');
+  }
+  // Show the user what actually got stored (scheme/path stripped).
+  baseUrlInput.value = baseUrl;
 
   const defaultId = document.getElementById('default-provider').value;
   const enabledIds = Array.from(document.querySelectorAll('#provider-toggles input:checked'))
@@ -168,9 +225,11 @@ function renderProviderChips() {
     activeProviderId = enabled[0]?.id || providers[0].id;
   }
   enabled.forEach(p => {
-    const chip = document.createElement('div');
+    const chip = document.createElement('button');
+    chip.type = 'button';
     chip.className = 'chip' + (p.id === activeProviderId ? ' active' : '');
     chip.textContent = p.name;
+    chip.setAttribute('aria-pressed', p.id === activeProviderId ? 'true' : 'false');
     chip.addEventListener('click', () => {
       activeProviderId = p.id;
       renderProviderChips();
@@ -183,16 +242,19 @@ function renderProviderChips() {
 async function processCurrentTab() {
   showLoading(true);
 
-  const stored = await new Promise(r => chrome.storage.local.get(['lastClickedImdbId'], r));
-  if (stored.lastClickedImdbId) {
-    chrome.storage.local.remove('lastClickedImdbId');
-    return processImdbId(stored.lastClickedImdbId);
+  const stored = await new Promise(r => chrome.storage.local.get('lastClicked', r));
+  const handoff = stored.lastClicked;
+  if (handoff && handoff.imdbId) {
+    chrome.storage.local.remove('lastClicked');
+    if (Date.now() - (handoff.at || 0) < LAST_CLICK_TTL_MS) {
+      return processImdbId(handoff.imdbId);
+    }
   }
 
   const tabs = await new Promise(r => chrome.tabs.query({ active: true, currentWindow: true }, r));
   const url = tabs[0]?.url || '';
 
-  if (isProviderUrl(url)) {
+  if (isProviderUrl(providers, url)) {
     return processProviderPage(url);
   }
   const imdbId = (url.match(/imdb\.com\/title\/(tt\d+)/) || [])[1];
@@ -206,61 +268,19 @@ async function processCurrentTab() {
   showEmptyState();
 }
 
-function isProviderUrl(url) {
-  return /vidsrc\.|embed\.su|2embed\.cc|autoembed\.cc|multiembed\.mov/.test(url);
-}
-
 function processProviderPage(url) {
-  let imdbId = null, season = null, episode = null, type = 'movie';
-
-  let m = url.match(/\/embed\/movie\/(tt\d+)/);
-  if (m) { imdbId = m[1]; type = 'movie'; }
-
-  if (!imdbId) {
-    m = url.match(/\/embed\/tv\/(tt\d+)\/(\d+)\/(\d+)/);
-    if (m) { imdbId = m[1]; season = +m[2]; episode = +m[3]; type = 'tv'; }
-  }
-
-  if (!imdbId) {
-    m = url.match(/\/embedtv\/(tt\d+)&s=(\d+)&e=(\d+)/);
-    if (m) { imdbId = m[1]; season = +m[2]; episode = +m[3]; type = 'tv'; }
-  }
-
-  if (!imdbId) {
-    m = url.match(/\/embed\/(tt\d+)/);
-    if (m) { imdbId = m[1]; type = 'movie'; }
-  }
-
-  if (!imdbId) {
-    m = url.match(/[?&]imdb=(tt\d+)/);
-    if (m) {
-      imdbId = m[1];
-      const s = url.match(/[?&]season=(\d+)/);
-      const e = url.match(/[?&]episode=(\d+)/);
-      if (s && e) { season = +s[1]; episode = +e[1]; type = 'tv'; }
-    }
-  }
-
-  if (!imdbId) {
-    m = url.match(/[?&]video_id=(tt\d+)/);
-    if (m) {
-      imdbId = m[1];
-      const s = url.match(/[?&]s=(\d+)/);
-      const e = url.match(/[?&]e=(\d+)/);
-      if (s && e) { season = +s[1]; episode = +e[1]; type = 'tv'; }
-    }
-  }
-
-  if (!imdbId) {
+  const parsed = parseProviderUrl(url);
+  if (!parsed) {
     showLoading(false);
     showError('Could not identify content from the current page.');
     return;
   }
-
   // Pass season/episode forward so applyTvInputs uses them
   // (this is the most authoritative source — user is actively watching).
-  const ctx = (type === 'tv') ? { season: season || 1, episode: episode || 1 } : null;
-  fetchContent(imdbId, type, ctx);
+  const ctx = parsed.type === 'tv'
+    ? { season: parsed.season || 1, episode: parsed.episode || 1 }
+    : null;
+  fetchContent(parsed.imdbId, parsed.type, ctx);
 }
 
 function processImdbId(imdbId, context) {
@@ -269,6 +289,9 @@ function processImdbId(imdbId, context) {
 
 function fetchContent(imdbId, forcedType, context) {
   currentImdbId = imdbId;
+  // Clear any error/empty state left over from a previous title, otherwise a
+  // stale red message sits above the title that loaded fine.
+  hideAllStates();
   chrome.runtime.sendMessage({ action: 'getContentDetails', imdbId }, async (response) => {
     showLoading(false);
 
@@ -294,7 +317,9 @@ function fetchContent(imdbId, forcedType, context) {
     currentTitle = response.title || `IMDb ${currentImdbId}`;
     renderContentInfo(response);
 
-    const detectedType = (response.type === 'TVSeries' || epCtx) ? 'tv' : 'movie';
+    // isTvType covers TVSeries, TVMiniSeries, TVEpisode and Series. Matching on
+    // 'TVSeries' alone used to classify every mini-series as a movie.
+    const detectedType = (isTvType(response.type) || epCtx) ? 'tv' : 'movie';
     const type = forcedType || detectedType;
 
     const progress = await getProgress(currentImdbId);
@@ -358,17 +383,33 @@ function renderContentInfo(details) {
   }
   posterEl.onerror = () => { posterEl.style.display = 'none'; };
 
+  // Built as DOM nodes rather than an HTML string: genres come straight from
+  // the fetched page's JSON-LD, and this runs in the extension's popup.
   const infoRow = document.getElementById('info-row');
-  infoRow.innerHTML = '';
+  infoRow.textContent = '';
   const parts = [];
-  if (year) parts.push(`<span>${year}</span>`);
-  if (runtime) parts.push(`<span>${runtime}</span>`);
+  if (year) parts.push({ text: String(year) });
+  if (runtime) parts.push({ text: String(runtime) });
   if (rating) {
     const count = ratingCount ? ` (${formatCount(ratingCount)})` : '';
-    parts.push(`<span class="rating">★ ${rating}${count}</span>`);
+    parts.push({ text: `★ ${rating}${count}`, className: 'rating' });
   }
-  if (Array.isArray(genres) && genres.length) parts.push(`<span>${genres.slice(0, 3).join(', ')}</span>`);
-  infoRow.innerHTML = parts.join('<span class="sep">·</span>');
+  if (Array.isArray(genres) && genres.length) {
+    const genreText = genres.filter(g => typeof g === 'string' && g.trim()).slice(0, 3).join(', ');
+    if (genreText) parts.push({ text: genreText });
+  }
+  parts.forEach((part, i) => {
+    if (i > 0) {
+      const sep = document.createElement('span');
+      sep.className = 'sep';
+      sep.textContent = '·';
+      infoRow.appendChild(sep);
+    }
+    const span = document.createElement('span');
+    if (part.className) span.className = part.className;
+    span.textContent = part.text;
+    infoRow.appendChild(span);
+  });
 
   const epEl = document.getElementById('episode-info');
   if (episodeContext && episodeContext.season && episodeContext.episode) {
@@ -379,7 +420,8 @@ function renderContentInfo(details) {
     epEl.classList.add('hidden');
   }
 
-  document.getElementById('id-row').textContent = `IMDb ${details.imdbId || imdbId} · ${type}`;
+  document.getElementById('id-row').textContent =
+    `IMDb ${details.imdbId || imdbId} · ${titleTypeLabel(type)}`;
 }
 
 function formatCount(n) {
@@ -416,7 +458,6 @@ function applyContentType(type) {
     movieControls.classList.remove('hidden');
     watchButton.textContent = 'Watch';
   }
-  chrome.storage.local.set({ contentType: type });
 }
 
 function handleContentTypeChange() {
@@ -451,11 +492,11 @@ function handleWatchClick() {
     url = buildVidsrcUrl(provider, 'movie', currentImdbId);
   }
 
-  saveProgress(currentImdbId, currentType, currentTitle, season, episode);
+  recordProgress(currentImdbId, currentType, currentTitle, season, episode);
 
   chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
     const tab = tabs[0];
-    if (tab && tab.url && isProviderUrl(tab.url)) {
+    if (tab && tab.url && isProviderUrl(providers, tab.url)) {
       chrome.tabs.update(tab.id, { url });
     } else {
       chrome.tabs.create({ url });
@@ -497,26 +538,14 @@ function handleNextEpisodeClick() {
 }
 
 // ---- Progress / history ----
-async function saveProgress(imdbId, type, title, season, episode) {
-  const data = await new Promise(r => chrome.storage.local.get('progress', r));
-  const progress = data.progress || {};
-  progress[imdbId] = {
-    imdbId, type, title,
-    season: season || null,
-    episode: episode || null,
-    timestamp: Date.now()
-  };
-  return new Promise(r => chrome.storage.local.set({ progress }, r));
-}
-
 async function getProgress(imdbId) {
-  const data = await new Promise(r => chrome.storage.local.get('progress', r));
-  return (data.progress || {})[imdbId] || null;
+  const progress = await loadProgress();
+  return progress[imdbId] || null;
 }
 
 async function loadHistory() {
-  const data = await new Promise(r => chrome.storage.local.get('progress', r));
-  return Object.values(data.progress || {}).sort((a, b) => b.timestamp - a.timestamp);
+  const progress = await loadProgress();
+  return Object.values(progress).sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
 }
 
 async function renderHistory() {
@@ -538,6 +567,8 @@ async function renderHistory() {
 function renderHistoryRow(entry) {
   const row = document.createElement('div');
   row.className = 'history-row';
+  row.tabIndex = 0;
+  row.setAttribute('role', 'button');
   const info = document.createElement('div');
   info.className = 'info';
   const title = document.createElement('div');
@@ -552,28 +583,34 @@ function renderHistoryRow(entry) {
   info.appendChild(sub);
   row.appendChild(info);
 
-  const del = document.createElement('div');
+  const del = document.createElement('button');
+  del.type = 'button';
   del.className = 'delete';
   del.textContent = '×';
   del.title = 'Remove';
+  del.setAttribute('aria-label', `Remove ${entry.title || entry.imdbId} from history`);
   del.addEventListener('click', (e) => { e.stopPropagation(); removeProgress(entry.imdbId); });
   row.appendChild(del);
 
-  row.addEventListener('click', () => {
+  const open = () => {
     switchTab('watch');
     hideAllStates();
+    showLoading(true);
     if (entry.type === 'tv' && entry.season && entry.episode) {
       document.getElementById('season').value = entry.season;
       document.getElementById('episode').value = entry.episode;
     }
     fetchContent(entry.imdbId, entry.type === 'tv' ? 'tv' : 'movie');
+  };
+  row.addEventListener('click', open);
+  row.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(); }
   });
   return row;
 }
 
 async function removeProgress(imdbId) {
-  const data = await new Promise(r => chrome.storage.local.get('progress', r));
-  const progress = data.progress || {};
+  const progress = await loadProgress();
   delete progress[imdbId];
   await new Promise(r => chrome.storage.local.set({ progress }, r));
   renderHistory();
@@ -626,6 +663,8 @@ async function runSearch(query) {
 function renderSearchRow(item) {
   const row = document.createElement('div');
   row.className = 'result-row';
+  row.tabIndex = 0;
+  row.setAttribute('role', 'button');
   const img = document.createElement('img');
   img.src = item.i?.imageUrl || '';
   img.alt = '';
@@ -645,18 +684,58 @@ function renderSearchRow(item) {
   info.appendChild(sub);
   row.appendChild(info);
 
-  row.addEventListener('click', () => {
+  const open = () => {
     switchTab('watch');
     hideAllStates();
-    const qid = (item.qid || '').toLowerCase();
-    const forcedType = qid.startsWith('tv') ? 'tv' : 'movie';
+    showLoading(true);
+    // qid is IMDb's own type id. A startsWith('tv') test misreads tvMovie,
+    // tvSpecial and tvShort as series; an unknown id defers to detection.
+    const mapped = schemaTypeFromImdbTypeId(item.qid);
+    const forcedType = mapped ? (isTvType(mapped) ? 'tv' : 'movie') : null;
     fetchContent(item.id, forcedType);
+  };
+  row.addEventListener('click', open);
+  row.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(); }
   });
   return row;
 }
 
 // ---- Episode picker ----
+async function initEpisodeCache() {
+  const data = await new Promise(r => chrome.storage.local.get('episodeCache', r));
+  const raw = data.episodeCache || {};
+  const now = Date.now();
+  for (const [key, entry] of Object.entries(raw)) {
+    if (entry && Array.isArray(entry.episodes) && entry.timestamp &&
+        now - entry.timestamp < EPISODE_CACHE_TTL_MS) {
+      episodeCache.set(key, entry);
+    }
+  }
+}
+
+function getCachedEpisodes(key) {
+  const entry = episodeCache.get(key);
+  if (!entry) return null;
+  if (Date.now() - entry.timestamp > EPISODE_CACHE_TTL_MS) {
+    episodeCache.delete(key);
+    return null;
+  }
+  return entry.episodes;
+}
+
+function setCachedEpisodes(key, episodes) {
+  // Re-insert so Map iteration order stays least-recently-used first.
+  episodeCache.delete(key);
+  episodeCache.set(key, { episodes, timestamp: Date.now() });
+  while (episodeCache.size > EPISODE_CACHE_LIMIT) {
+    episodeCache.delete(episodeCache.keys().next().value);
+  }
+  chrome.storage.local.set({ episodeCache: Object.fromEntries(episodeCache) });
+}
+
 async function loadEpisodeList(imdbId, season) {
+  const requestId = ++episodeRequestSeq;
   const status = document.getElementById('episode-status');
   const list = document.getElementById('episode-list');
   list.innerHTML = '';
@@ -664,15 +743,19 @@ async function loadEpisodeList(imdbId, season) {
   status.classList.remove('hidden');
 
   const cacheKey = `${imdbId}/${season}`;
-  let episodes = episodeCache.get(cacheKey);
+  let episodes = getCachedEpisodes(cacheKey);
   if (!episodes) {
     try {
       episodes = await fetchEpisodes(imdbId, season);
-      if (episodes && episodes.length > 0) episodeCache.set(cacheKey, episodes);
+      if (episodes && episodes.length > 0) setCachedEpisodes(cacheKey, episodes);
     } catch (e) {
       episodes = null;
     }
   }
+
+  // The user moved on to another season while this was in flight; whichever
+  // request started last owns the list.
+  if (requestId !== episodeRequestSeq) return;
 
   if (!episodes || episodes.length === 0) {
     status.textContent = 'Episode list unavailable — use the inputs above.';
@@ -684,6 +767,8 @@ async function loadEpisodeList(imdbId, season) {
   episodes.forEach(ep => {
     const row = document.createElement('div');
     row.className = 'episode-row' + (ep.number === currentEp ? ' active' : '');
+    row.tabIndex = 0;
+    row.setAttribute('role', 'button');
     const num = document.createElement('span');
     num.className = 'num';
     num.textContent = `E${ep.number}`;
@@ -698,10 +783,14 @@ async function loadEpisodeList(imdbId, season) {
       date.textContent = ep.airDate;
       row.appendChild(date);
     }
-    row.addEventListener('click', () => {
+    const select = () => {
       document.getElementById('episode').value = ep.number;
       document.querySelectorAll('.episode-row').forEach(r => r.classList.remove('active'));
       row.classList.add('active');
+    };
+    row.addEventListener('click', select);
+    row.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); select(); }
     });
     list.appendChild(row);
   });
@@ -770,6 +859,7 @@ function refreshStarToggle(imdbId) {
   star.style.display = '';
   star.dataset.imdbId = imdbId;
   chrome.runtime.sendMessage({ action: 'inWatchlist', imdbId }, (resp) => {
+    if (chrome.runtime.lastError) return;
     setStar(resp && resp.saved);
   });
 }
@@ -778,6 +868,7 @@ function setStar(saved) {
   const star = document.getElementById('star-toggle');
   star.textContent = saved ? '★' : '☆';
   star.title = saved ? 'Remove from watchlist' : 'Save to watchlist';
+  star.setAttribute('aria-pressed', saved ? 'true' : 'false');
 }
 
 function handleStarToggle() {
@@ -785,7 +876,7 @@ function handleStarToggle() {
   const id = star.dataset.imdbId;
   if (!id) return;
   chrome.runtime.sendMessage({ action: 'toggleWatchlist', imdbId: id }, (resp) => {
-    if (!resp) return;
+    if (chrome.runtime.lastError || !resp) return;
     if (resp.error) {
       star.title = resp.error;
       // Brief visual nudge
@@ -814,6 +905,8 @@ async function renderSaved() {
 function renderSavedRow(entry) {
   const row = document.createElement('div');
   row.className = 'history-row';
+  row.tabIndex = 0;
+  row.setAttribute('role', 'button');
 
   const info = document.createElement('div');
   info.className = 'info';
@@ -831,20 +924,30 @@ function renderSavedRow(entry) {
   info.appendChild(sub);
   row.appendChild(info);
 
-  const del = document.createElement('div');
+  const del = document.createElement('button');
+  del.type = 'button';
   del.className = 'delete';
   del.textContent = '×';
   del.title = 'Remove';
+  del.setAttribute('aria-label', `Remove ${entry.title || entry.imdbId} from watchlist`);
   del.addEventListener('click', (e) => {
     e.stopPropagation();
-    chrome.runtime.sendMessage({ action: 'toggleWatchlist', imdbId: entry.imdbId }, () => renderSaved());
+    chrome.runtime.sendMessage({ action: 'toggleWatchlist', imdbId: entry.imdbId }, () => {
+      if (chrome.runtime.lastError) return;
+      renderSaved();
+    });
   });
   row.appendChild(del);
 
-  row.addEventListener('click', () => {
+  const open = () => {
     switchTab('watch');
     hideAllStates();
+    showLoading(true);
     fetchContent(entry.imdbId, entry.type, null);
+  };
+  row.addEventListener('click', open);
+  row.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(); }
   });
   return row;
 }

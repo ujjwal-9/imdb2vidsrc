@@ -41,7 +41,10 @@
     }
     .input-group { flex: 1; }
     .input-group label { margin: 0 0 4px; }
-    button {
+    /* Primary/secondary action buttons. The :not() keeps this off the small
+       inline controls (provider chips, row delete buttons), which are also
+       real <button>s so they stay keyboard reachable. */
+    button:not(.chip):not(.delete) {
       background: #f50;
       color: white;
       border: none;
@@ -53,7 +56,8 @@
       font-weight: 600;
       font-size: 14px;
     }
-    button:hover { background: #e74c00; }
+    button:not(.chip):not(.delete):hover { background: #e74c00; }
+    :focus-visible { outline: 2px solid #f50; outline-offset: 1px; }
     .secondary-button {
       background: #f2f2f2;
       color: #333;
@@ -168,6 +172,10 @@
       background: #fff;
       cursor: pointer;
       color: #333;
+      width: auto;
+      margin: 0;
+      font-weight: 400;
+      font-family: inherit;
     }
     .chip:hover { background: #f5f5f5; }
     .chip.active {
@@ -250,6 +258,12 @@
       cursor: pointer;
       font-size: 16px;
       padding: 0 4px;
+      background: none;
+      border: none;
+      width: auto;
+      margin: 0;
+      font-weight: 400;
+      line-height: 1;
     }
     .history-row .delete:hover { color: #c00; }
     .empty-list { color: #888; font-size: 13px; text-align: center; padding: 24px 0; }
@@ -275,15 +289,15 @@
   </style>
 </head>
 <body>
-  <div class="tabs">
-    <div class="tab active" data-tab="watch">Watch</div>
-    <div class="tab" data-tab="search">Search</div>
-    <div class="tab" data-tab="saved">Saved</div>
-    <div class="tab" data-tab="history">History</div>
-    <div class="tab" data-tab="settings">Settings</div>
+  <div class="tabs" role="tablist" aria-label="Sections">
+    <div class="tab active" data-tab="watch" id="tab-watch" role="tab" tabindex="0" aria-selected="true" aria-controls="watch-tab">Watch</div>
+    <div class="tab" data-tab="search" id="tab-search" role="tab" tabindex="-1" aria-selected="false" aria-controls="search-tab">Search</div>
+    <div class="tab" data-tab="saved" id="tab-saved" role="tab" tabindex="-1" aria-selected="false" aria-controls="saved-tab">Saved</div>
+    <div class="tab" data-tab="history" id="tab-history" role="tab" tabindex="-1" aria-selected="false" aria-controls="history-tab">History</div>
+    <div class="tab" data-tab="settings" id="tab-settings" role="tab" tabindex="-1" aria-selected="false" aria-controls="settings-tab">Settings</div>
   </div>
 
-  <div id="watch-tab" class="tab-content active">
+  <div id="watch-tab" class="tab-content active" role="tabpanel" aria-labelledby="tab-watch">
     <div id="loading" class="hidden">
       <div class="loader"></div>
       <p style="text-align:center;color:#888;font-size:12px;margin:0;">Detecting content type...</p>
@@ -298,7 +312,7 @@
       <div class="body">
         <div class="title-row">
           <div class="title-text" id="title"></div>
-          <span class="star" id="star-toggle" title="Save to watchlist">☆</span>
+          <span class="star" id="star-toggle" role="button" tabindex="0" aria-pressed="false" title="Save to watchlist">☆</span>
         </div>
         <div class="info-row" id="info-row"></div>
         <div class="episode-info hidden" id="episode-info"></div>
@@ -327,11 +341,11 @@
       <div class="input-container">
         <div class="input-group">
           <label for="season">Season</label>
-          <input type="number" id="season" min="1" step="1" value="1">
+          <input type="number" id="season" min="1" max="200" step="1" value="1">
         </div>
         <div class="input-group">
           <label for="episode">Episode</label>
-          <input type="number" id="episode" min="1" step="1" value="1">
+          <input type="number" id="episode" min="1" max="2000" step="1" value="1">
         </div>
       </div>
       <div id="episode-picker">
@@ -356,26 +370,26 @@
     <div id="error-message" class="hidden"></div>
   </div>
 
-  <div id="search-tab" class="tab-content">
+  <div id="search-tab" class="tab-content" role="tabpanel" aria-labelledby="tab-search">
     <input type="search" id="search-input" placeholder="Search movies, TV shows, ..." autocomplete="off">
     <div id="search-status" class="empty-list hidden">Type at least 2 characters</div>
     <div id="search-results"></div>
   </div>
 
-  <div id="saved-tab" class="tab-content">
+  <div id="saved-tab" class="tab-content" role="tabpanel" aria-labelledby="tab-saved">
     <h2>Saved titles</h2>
     <div id="saved-list"></div>
     <div id="saved-empty" class="empty-list hidden">Nothing saved yet. Tap ☆ on a title to add it.</div>
   </div>
 
-  <div id="history-tab" class="tab-content">
+  <div id="history-tab" class="tab-content" role="tabpanel" aria-labelledby="tab-history">
     <h2>Continue watching</h2>
     <div id="history-list"></div>
     <div id="history-empty" class="empty-list hidden">Nothing watched yet.</div>
     <button id="clear-history" class="secondary-button hidden">Clear history</button>
   </div>
 
-  <div id="settings-tab" class="tab-content">
+  <div id="settings-tab" class="tab-content" role="tabpanel" aria-labelledby="tab-settings">
     <h2>Settings</h2>
 
     <label for="default-provider">Default provider</label>

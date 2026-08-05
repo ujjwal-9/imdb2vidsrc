@@ -1,0 +1,19 @@
+# macOS
+.DS_Store
+**/.DS_Store
+
+# Editors
+.vscode/
+.idea/
+*.swp
+
+# Dependencies (dev-only; the extension itself ships no bundled code)
+node_modules/
+
+# Tooling / agent scratch
+.omc/
+
+# Packaged extension
+*.zip
+*.crx
+*.pem
